@@ -1,0 +1,455 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no" />
+<title>Aircraft Game — Final</title>
+
+<style>
+  :root{
+    --ratio-w: 75vw;
+    --ratio-h: calc(var(--ratio-w) * 1.33);
+    --btn-size: 70px;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;}
+  html,body{height:100%;background:#000;user-select:none;touch-action:none;}
+
+  .wrap{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;}
+
+  .frame{
+    width:var(--ratio-w);
+    height:var(--ratio-h);
+    max-width:900px;
+    background:#000;
+    overflow:hidden;
+    position:relative;
+  }
+  canvas{width:100%;height:100%}
+
+  .controls{margin-top:20px;display:flex;gap:40px;}
+  .btn{
+    width:var(--btn-size);
+    height:var(--btn-size);
+    border-radius:50%;
+    background:#222;
+    border:2px solid #666;
+    color:white;
+    display:flex;
+    justify-content:center;
+    align-items:center;
+    font-size:26px;
+  }
+  .btn:active{background:#444;}
+</style>
+</head>
+
+<body>
+<div class="wrap">
+
+  <div class="frame" id="frame">
+    <canvas id="canvas"></canvas>
+
+    <div id="hud" style="position:absolute;left:10px;top:10px;color:#fff;font-size:20px;font-family:Arial;z-index:20;">
+      Score: <span id="score">0</span>
+    </div>
+
+    <div id="hearts" style="position:absolute;right:10px;top:10px;display:flex;gap:6px;z-index:20;"></div>
+
+    <div id="powerRow" style="position:absolute;right:10px;top:50px;display:flex;flex-direction:column;gap:6px;z-index:20;"></div>
+
+    <div id="loading"
+         style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);color:white;font-size:22px;font-family:Arial;">
+      Loading...
+    </div>
+  </div>
+
+  <!-- BUTTONS -->
+  <div class="controls">
+    <div class="btn" id="btnLeft">←</div>
+    <div class="btn" id="btnRight">→</div>
+  </div>
+
+</div>
+
+<audio id="bgm" src="./sounds/bgm.mpeg" loop></audio>
+
+<script>
+/* ========================================================= */
+/*        AUTO-FIX PATH for ANY GitHub Pages folder          */
+/* ========================================================= */
+const BASE = window.location.pathname.replace(/\/[^/]*$/, "");
+
+/* ========================================================= */
+const PATHS = {
+  bg: `${BASE}/assets/background.png`,
+  player:`${BASE}/assets/player.png`,
+  enemy:`${BASE}/assets/enemy.png`,
+  boss:`${BASE}/assets/boss.png`,
+  bulletP:`${BASE}/assets/bullet_green.png`,
+  bulletE:`${BASE}/assets/bullet_red.png`,
+  powerDouble:`${BASE}/assets/power_double_fire.png`,
+  powerShield:`${BASE}/assets/power_shield.png`,
+  powerLife:`${BASE}/assets/power_extra_life.png`,
+  heart:`${BASE}/assets/heart.png`
+};
+
+/* ---------------- GAME CONSTANTS ---------------- */
+const PLAYER_FIRE_MS = 260;   // slower fire rate
+const ENEMY_FIRE_MS  = 900;
+const ENEMY_SPAWN_MS = 1400;
+const POWER_SPAWN_MS = 3400;
+const POWER_DROP_CHANCE = 0.25;
+
+let nextBossScore = 200;
+let bossWaveCount = 1;
+
+/* ---------------- SETUP ---------------- */
+const frame = document.getElementById('frame');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+function fitCanvas(){
+  const r = frame.getBoundingClientRect();
+  canvas.width = r.width;
+  canvas.height = r.height;
+}
+fitCanvas();
+addEventListener('resize', fitCanvas);
+
+/* ----------- LOAD IMAGES SAFELY ----------- */
+const imgs = {};
+let toLoad = Object.keys(PATHS).length;
+
+for(const [k,src] of Object.entries(PATHS)){
+  const img = new Image();
+  img.src = src;
+  img.onload = () => {
+    imgs[k] = img;
+    if(--toLoad === 0) startGame();
+  };
+  img.onerror = () => {
+    document.getElementById('loading').innerHTML = "Asset load failed:<br>" + src;
+  };
+}
+
+/* ---------------- STATE ---------------- */
+let running = false;
+let score = 0;
+
+let lastPlayerShot=0, lastEnemySpawn=0, lastPowerSpawn=0;
+
+let bulletsP=[], bulletsE=[], enemies=[], bosses=[], powers=[];
+let bgY=0;
+
+const player = {
+  x:0, y:0, w:70, h:70,
+  lives:3,
+  fireLevel:0,
+  shieldUntil:0
+};
+
+function positionPlayer(){
+  const r = frame.getBoundingClientRect();
+  player.w = r.width * 0.16;
+  player.h = player.w;
+  player.x = (r.width - player.w) / 2;
+  player.y = r.height - player.h - 20;
+}
+
+/* ---------------- HUD UPDATE ---------------- */
+const scoreEl = document.getElementById('score');
+const heartsDOM = document.getElementById('hearts');
+const powerRow = document.getElementById('powerRow');
+
+function updateHUD(){
+  scoreEl.textContent = score;
+
+  heartsDOM.innerHTML = '';
+  for(let i=0;i<player.lives;i++){
+    const h = document.createElement('img');
+    h.src = PATHS.heart;
+    h.style.width = "32px";
+    heartsDOM.appendChild(h);
+  }
+
+  powerRow.innerHTML = "";
+  if(player.fireLevel>0){
+    let p=document.createElement("img");
+    p.src=PATHS.powerDouble;
+    p.style.width="36px";
+    powerRow.appendChild(p);
+  }
+  if(player.shieldUntil>Date.now()){
+    let s=document.createElement("img");
+    s.src=PATHS.powerShield;
+    s.style.width="36px";
+    powerRow.appendChild(s);
+  }
+}
+
+/* ---------------- BUTTONS ---------------- */
+document.getElementById('btnLeft').addEventListener('touchstart',()=>{
+  player.x -= 45;
+});
+document.getElementById('btnRight').addEventListener('touchstart',()=>{
+  player.x += 45;
+});
+
+function clampPlayer(){
+  const r = frame.getBoundingClientRect();
+  player.x = Math.max(6, Math.min(player.x, r.width - player.w - 6));
+}
+
+/* ---------------- SHOOT ---------------- */
+function shootPlayer(){
+  const mid = player.x + player.w/2 - 6;
+
+  if(player.fireLevel === 0){
+    bulletsP.push({x:mid, y:player.y-20, w:12, h:26, spd:12});
+  }
+  else if(player.fireLevel === 1){
+    bulletsP.push({x:player.x+8, y:player.y-20, w:12, h:26, spd:12});
+    bulletsP.push({x:player.x+player.w-20, y:player.y-20, w:12, h:26, spd:12});
+  }
+  else {
+    bulletsP.push({x:mid, y:player.y-20, w:12, h:26, spd:12});
+    bulletsP.push({x:player.x+8, y:player.y-20, w:12, h:26, spd:12});
+    bulletsP.push({x:player.x+player.w-20, y:player.y-20, w:12, h:26, spd:12});
+  }
+}
+
+/* ---------------- POWER-UPS ---------------- */
+function spawnPower(){
+  const r = frame.getBoundingClientRect();
+  const types = ["double","life","shield"];
+  const type = types[Math.floor(Math.random()*types.length)];
+
+  powers.push({
+    type,
+    x: Math.random()*(r.width-50),
+    y: -60,
+    w:50, h:50,
+    spd:1.4
+  });
+}
+
+/* ---------------- ENEMIES ---------------- */
+function spawnEnemy(){
+  const r = frame.getBoundingClientRect();
+  enemies.push({
+    x: Math.random()*(r.width-60),
+    y: -80,
+    w:60, h:60,
+    speed: 1.8 + Math.random()*1.5,
+    lastShot: Date.now()
+  });
+}
+
+/* ---------------- BOSSES ---------------- */
+function spawnBossWave(){
+  const r = frame.getBoundingClientRect();
+
+  for(let i=0;i<bossWaveCount;i++){
+    bosses.push({
+      x: 60 + i*150,
+      y: -200,
+      w:140, h:140,
+      hp: 70 + bossWaveCount*20,
+      vx: (i%2===0?1:-1) * 1.1,
+      lastShot: Date.now()
+    });
+  }
+
+  bossWaveCount++;
+  nextBossScore += 200;
+}
+
+/* ---------------- COLLISION ---------------- */
+function hit(a,b){
+  return a.x < b.x+b.w &&
+         a.x+a.w > b.x &&
+         a.y < b.y+b.h &&
+         a.y+a.h > b.y;
+}
+
+function playerHit(){
+  if(player.shieldUntil > Date.now()) return;
+  player.lives--;
+  if(player.lives <= 0){
+    alert("Game Over! Score: "+score);
+    location.reload();
+  }
+}
+
+/* ---------------- UPDATE ---------------- */
+function update(){
+  const r = frame.getBoundingClientRect();
+
+  bgY += 1.4; if(bgY > r.height) bgY=0;
+
+  /* fire */
+  if(Date.now()-lastPlayerShot > PLAYER_FIRE_MS){
+    lastPlayerShot = Date.now();
+    shootPlayer();
+  }
+
+  /* enemies spawn */
+  if(Date.now()-lastEnemySpawn > ENEMY_SPAWN_MS){
+    lastEnemySpawn = Date.now();
+    spawnEnemy();
+  }
+
+  /* power spawn */
+  if(Date.now()-lastPowerSpawn > POWER_SPAWN_MS){
+    lastPowerSpawn = Date.now();
+    spawnPower();
+  }
+
+  /* enemy move + fire */
+  enemies.forEach(e=>{
+    e.y += e.speed;
+    if(Date.now()-e.lastShot > ENEMY_FIRE_MS){
+      e.lastShot = Date.now();
+      bulletsE.push({
+        x:e.x+e.w/2-6,
+        y:e.y+e.h,
+        w:12,h:26,spd:6
+      });
+    }
+  });
+  enemies = enemies.filter(e=>e.y < r.height+80);
+
+  /* bosses move + fire */
+  bosses.forEach(b=>{
+    b.y += 0.8;
+    b.x += b.vx;
+    if(b.x<6 || b.x+b.w > r.width-6) b.vx *= -1;
+
+    if(Date.now()-b.lastShot > 800){
+      b.lastShot = Date.now();
+      bulletsE.push({
+        x:b.x+b.w/2-8,
+        y:b.y+b.h,
+        w:14,h:30,spd:6
+      });
+    }
+  });
+
+  /* bullets */
+  bulletsP.forEach(b=>b.y -= b.spd);
+  bulletsE.forEach(b=>b.y += b.spd);
+  powers.forEach(p=>p.y += p.spd);
+
+  /* bullet hits */
+  bulletsP = bulletsP.filter(pb=>{
+    let hitSomething = false;
+
+    enemies = enemies.filter(e=>{
+      if(hit(pb,e)){
+        hitSomething=true;
+        score+=10;
+        return false;
+      }
+      return true;
+    });
+
+    bosses.forEach(b=>{
+      if(hit(pb,b)){
+        hitSomething=true;
+        b.hp--;
+        score+=3;
+      }
+    });
+
+    return !hitSomething;
+  });
+
+  bosses = bosses.filter(b=>b.hp>0);
+
+  /* enemy bullets hit */
+  bulletsE = bulletsE.filter(eb=>{
+    if(hit(eb,player)){
+      playerHit();
+      return false;
+    }
+    return eb.y < r.height+40;
+  });
+
+  /* powerups */
+  powers = powers.filter(p=>{
+    if(hit(p,player)){
+      if(p.type==="double") player.fireLevel = Math.min(2, player.fireLevel+1);
+      if(p.type==="life")   player.lives = Math.min(3, player.lives+1);
+      if(p.type==="shield") player.shieldUntil = Date.now()+5000;
+      return false;
+    }
+    return p.y < r.height+40;
+  });
+
+  /* boss wave trigger */
+  if(score >= nextBossScore){
+    spawnBossWave();
+  }
+
+  updateHUD();
+  clampPlayer();
+}
+
+/* ---------------- DRAW ---------------- */
+function draw(){
+  const r = frame.getBoundingClientRect();
+  ctx.clearRect(0,0,r.width,r.height);
+
+  /* background */
+  if(imgs.bg){
+    const h = r.height;
+    const y = bgY % h;
+    ctx.drawImage(imgs.bg,0,y-h,r.width,h);
+    ctx.drawImage(imgs.bg,0,y,r.width,h);
+  }
+
+  /* powers */
+  powers.forEach(p=>{
+    const img = p.type==="double"?imgs.powerDouble
+             : p.type==="life"?imgs.powerLife
+             : imgs.powerShield;
+    ctx.drawImage(img,p.x,p.y,p.w,p.h);
+  });
+
+  /* enemies */
+  enemies.forEach(e=>{
+    ctx.drawImage(imgs.enemy,e.x,e.y,e.w,e.h);
+  });
+
+  /* bosses */
+  bosses.forEach(b=>{
+    ctx.drawImage(imgs.boss,b.x,b.y,b.w,b.h);
+  });
+
+  /* bullets */
+  bulletsP.forEach(b=>ctx.drawImage(imgs.bulletP,b.x,b.y,b.w,b.h));
+  bulletsE.forEach(b=>ctx.drawImage(imgs.bulletE,b.x,b.y,b.w,b.h));
+
+  /* player */
+  ctx.drawImage(imgs.player,player.x,player.y,player.w,player.h);
+}
+
+/* ---------------- LOOP ---------------- */
+function loop(){
+  if(!running) return;
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+
+/* ---------------- START ---------------- */
+function startGame(){
+  document.getElementById('loading').style.display="none";
+  positionPlayer();
+  running = true;
+  requestAnimationFrame(loop);
+}
+
+</script>
+</body>
+</html>
